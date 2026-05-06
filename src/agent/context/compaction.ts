@@ -1,5 +1,5 @@
 import { generateText, type ModelMessage } from "ai";
-import { openai } from "@ai-sdk/openai";
+import { groq } from "@ai-sdk/groq";
 import { extractMessageText } from "./tokenEstimator.ts";
 
 const SUMMARIZATION_PROMPT = `
@@ -30,7 +30,7 @@ function messagesToText(messages: ModelMessage[]): string {
  */
 export async function compactConversation(
   messages: ModelMessage[],
-  model: string = "gpt-5-mini",
+  model: string = "llama-3.1-8b-instant",
 ): Promise<any> {
   // Filter out system messages - they're handled separately
   //
