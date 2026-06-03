@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import "dotenv/config";
+import "./config/env.ts";
 import React from "react";
 import { render } from "ink";
 import { initializeLaminar } from "./observability/laminar.ts";

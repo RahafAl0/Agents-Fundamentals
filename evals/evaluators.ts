@@ -1,3 +1,4 @@
+import "../src/config/env.ts";
 import { generateObject } from "ai";
 import { groq } from "@ai-sdk/groq";
 import { z } from "zod";
@@ -8,6 +9,55 @@ import type {
   MultiTurnTarget,
   MultiTurnResult,
 } from "./types.ts";
+import { open } from "fs";
+
+const judgeSchema = z.object({
+  score: z.number().min(1).max(10).describe("Score from 1 to 10"),
+  reason: z.string().describe("Brief explanation of the score"),
+});
+
+export const llmJudge = async (
+  output: MultiTurnResult,
+  target: MultiTurnTarget,
+) => {
+  const result = await generateObject({
+    model: groq("openai/gpt-oss-20b"),
+    schema: judgeSchema,
+    schemaName: "evaluation",
+    providerOptions: {
+      openai: {
+        reasoningEffort: "high",
+      },
+    },
+    schemaDescription: "Evaluation of an AI agent response",
+    messages: [
+      {
+        role: "system",
+        content: `You are an evaluation judge. Score the agent's response on a scale of 1-10.
+
+        Scoring criteria:
+        - 10: Response fully addresses the task using tool results correctly
+        - 7-9: Response is mostly correct with minor issues
+        - 4-6: Response partially addresses the task
+        - 1-3: Response is mostly incorrect or irrelevant`,
+      },
+      {
+        role: "user",
+        content: `Task: ${target.originalTask}
+
+        Tools called: ${JSON.stringify(output.toolCallOrder)}
+        Tool results provided: ${JSON.stringify(target.mockToolResults)}
+
+        Agent's final response:
+        ${output.text}
+
+        Evaluate if this response correctly uses the tool results to answer the task.`,
+      },
+    ],
+  });
+
+  return result.object.score / 10;
+};
 
 export function toolsSelected(
   output: SingleTurnResult | MultiTurnResult,
@@ -28,7 +78,6 @@ export function toolsSelected(
 
   return expectedTools.every((t) => selected.has(t)) ? 1 : 0;
 }
-
 
 export function toolsAvoided(
   output: SingleTurnResult | MultiTurnResult,

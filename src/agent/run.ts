@@ -1,4 +1,4 @@
-import "dotenv/config";
+import "../config/env.ts";
 import { streamText, type ModelMessage } from "ai";
 import { groq } from "@ai-sdk/groq";
 import { getTracer, Laminar } from "@lmnr-ai/lmnr";
@@ -7,6 +7,14 @@ import { SYSTEM_PROMPT } from "./system/prompt.ts";
 import { filterCompatibleMessages } from "./system/filterMessages.ts";
 import { tools } from "./tools/index.js";
 import type { AgentCallbacks, ToolCallInfo } from "../types.ts";
+import {
+  estimateMessagesTokens,
+  getModelLimits,
+  isOverThreshold,
+  calculateUsagePercentage,
+  compactConversation,
+  DEFAULT_THRESHOLD,
+} from "./context/index.ts";
 
 const LMNR_PROJECT_API_KEY =
   process.env.LMNR_PROJECT_API_KEY ?? process.env.LMNR_API_KEY;
@@ -17,21 +25,28 @@ if (LMNR_PROJECT_API_KEY && !Laminar.initialized()) {
   });
 }
 
-const MODEL_NAME = "llama-3.1-8b-instant";
+const MODEL_NAME = "openai/gpt-oss-20b";
 
 export async function runAgent(
   userMessage: string,
   conversationHistory: ModelMessage[],
   callbacks: AgentCallbacks,
 ): Promise<ModelMessage[]> {
+  const modelLimits = getModelLimits(MODEL_NAME);
   const workingHistory = filterCompatibleMessages(conversationHistory);
 
-  const messages: ModelMessage[] = [
+  let messages: ModelMessage[] = [
     { role: "system", content: SYSTEM_PROMPT },
     ...workingHistory,
     { role: "user", content: userMessage },
   ];
 
+  const preCheckTokens = estimateMessagesTokens(messages);
+  if (isOverThreshold(preCheckTokens.total, modelLimits.contextWindow)) {
+    // Compact the conversation
+    messages = await compactConversation(workingHistory, MODEL_NAME);
+  }
+  
   let fullResponse = "";
 
   while (true) {
@@ -48,6 +63,25 @@ export async function runAgent(
         tracer: getTracer(),
       },
     });
+
+    const reportTokenUsage = () => {
+      if (callbacks.onTokenUsage) {
+        const usage = estimateMessagesTokens(messages);
+        callbacks.onTokenUsage({
+          inputTokens: usage.input,
+          outputTokens: usage.output,
+          totalTokens: usage.total,
+          contextWindow: modelLimits.contextWindow,
+          threshold: DEFAULT_THRESHOLD,
+          percentage: calculateUsagePercentage(
+            usage.total,
+            modelLimits.contextWindow,
+          ),
+        });
+      }
+    };
+
+    reportTokenUsage();
 
     const toolCalls: ToolCallInfo[] = [];
     let currentText = "";
@@ -91,31 +125,33 @@ export async function runAgent(
     }
 
     const finishReason = await result.finishReason;
-    const responseMessages = await result.response;
-    messages.push(...responseMessages.messages);
 
     if (finishReason !== "tool-calls" || toolCalls.length === 0) {
+      const responseMessage = await result.response;
+      messages.push(...responseMessage.messages);
+      reportTokenUsage();
       break;
     }
 
-    for (const toolCall of toolCalls) {
-      const toolResult = await executeTool(toolCall.toolName, toolCall.args);
-      callbacks.onToolCallEnd(toolCall.toolName, toolResult);
+    const responseMessages = await result.response;
+    messages.push(...responseMessages.messages);
+
+    for (const tc of toolCalls) {
+      const result = await executeTool(tc.toolName, tc.args);
+      callbacks.onToolCallEnd(tc.toolName, result);
 
       messages.push({
         role: "tool",
         content: [
           {
             type: "tool-result",
-            toolCallId: toolCall.toolCallId,
-            toolName: toolCall.toolName,
-            output: {
-              type: "text",
-              value: toolResult,
-            },
+            toolCallId: tc.toolCallId,
+            toolName: tc.toolName,
+            output: { type: "text", value: result },
           },
         ],
       });
+      reportTokenUsage();
     }
   }
 
